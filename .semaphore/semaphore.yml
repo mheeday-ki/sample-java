@@ -1,0 +1,122 @@
+version: v1.0
+name: Build Pipeline
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu1804
+
+blocks:
+  - name: Synchronise
+    task:
+      secrets:
+        - name: gke-staging
+        - name: ssh-key
+      prologue:
+        commands:
+          - chmod 600 ~/.ssh/id
+          - chmod 600 ~/.ssh/id.pub
+          - ssh-add ~/.ssh/id
+          - checkout --use-cache
+      jobs:
+        - name: Everything
+          commands:
+            - bash ~/.scripts/sync.sh
+
+  - name: Test
+    task:
+      secrets:
+        - name: gke-staging
+      prologue:
+        commands:
+          - sem-version java 11
+          - checkout
+      jobs:
+      - name: Style Check
+        commands:
+          - echo '5c57ae7cf68ccf9ae4f989b4cd71428ada22f7e983b3f3d9501c88799ae3e77f  checkstyle-8.45-all.jar' > checkstyle-8.45-all.jar.SHA256SUM
+          - wget https://github.com/checkstyle/checkstyle/releases/download/checkstyle-8.45/checkstyle-8.45-all.jar
+          - sha256sum -c checkstyle-8.45-all.jar.SHA256SUM
+          - java -jar checkstyle-8.45-all.jar -c /google_checks.xml src/
+      - name: Test
+        commands:
+          - ./gradlew build test
+      - name: Test Coverage
+        commands:
+          - ./gradlew build jacocoTestCoverageVerification
+
+  - name: Push
+    task:
+      secrets:
+        - name: gke-staging
+        - name: ssh-key
+      prologue:
+        commands:
+          - chmod 600 ~/.ssh/id
+          - chmod 600 ~/.ssh/id.pub
+          - ssh-add ~/.ssh/id
+          - bash ~/.scripts/init-gke.sh
+          - checkout
+          - cp ~/.gradle/gradle.properties .
+      jobs:
+      - name: Everything
+        commands:
+          - bash ~/.scripts/push-image.sh
+
+  - name: Scan
+    task:
+      secrets:
+        - name: gke-staging
+        - name: ssh-key
+        - name: vulnerability-analysis
+      prologue:
+        commands:
+          - export PATH=$HOME/.local/bin:$PATH
+          - chmod 600 ~/.ssh/id
+          - chmod 600 ~/.ssh/id.pub
+          - ssh-add ~/.ssh/id
+          - bash ~/.scripts/init-gke.sh
+          - sem-version python 3.7
+          - pip3 install google-cloud-containeranalysis==2.0.0
+          - checkout
+      jobs:
+      - name: Everything
+        commands:
+          - bash ~/.scripts/scan.sh
+
+promotions:
+  - name: Deploy PR Environment
+    pipeline_file: deploy-pr.yml
+    auto_promote_on:
+      - result: passed
+        branch:
+          - "^feature\/"
+          - "^bugfix\/"
+          - "^hotfix\/"
+
+  - name: Deploy Dev Environment
+    pipeline_file: deploy-dev.yml
+    auto_promote_on:
+      - result: passed
+        branch:
+          - "^develop$"
+
+  - name: Deploy Test Environment
+    pipeline_file: deploy-test.yml
+    auto_promote_on:
+      - result: passed
+        branch:
+          - "^develop$"
+
+  - name: Deploy Staging Environment
+    pipeline_file: deploy-staging.yml
+    auto_promote_on:
+      - result: passed
+        branch:
+          - "^release\/"
+
+  - name: Deploy Production Environment
+    pipeline_file: deploy-production.yml
+    auto_promote_on:
+      - result: passed
+        branch:
+          - "^master$"
